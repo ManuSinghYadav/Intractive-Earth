@@ -2,209 +2,14 @@ import React, { useRef, useMemo, useEffect, useState } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, Stars, useTexture, Html, Line } from '@react-three/drei';
 import * as THREE from 'three';
+import * as Astronomy from 'astronomy-engine';
 import * as SunCalc from 'suncalc';
 import tzlookup from 'tz-lookup';
 import { X, Sunrise, Sunset, Moon as MoonIcon } from 'lucide-react';
 import { geoContains, geoArea } from 'd3-geo';
+import { ISSTracker, StarlinkSwarm } from './Satellites';
 
-const sunVertexShader = `
-  varying vec2 vUv;
-  varying vec3 vPosition;
-  void main() {
-    vUv = uv;
-    vPosition = position;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  }
-`;
 
-const sunFragmentShader = `
-  uniform float time;
-  varying vec2 vUv;
-  varying vec3 vPosition;
-
-  // 3D Simplex Noise
-  vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
-  vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
-  vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
-  vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
-
-  float snoise(vec3 v) {
-    const vec2  C = vec2(1.0/6.0, 1.0/3.0) ;
-    const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
-    vec3 i  = floor(v + dot(v, C.yyy) );
-    vec3 x0 = v - i + dot(i, C.xxx) ;
-    vec3 g = step(x0.yzx, x0.xyz);
-    vec3 l = 1.0 - g;
-    vec3 i1 = min( g.xyz, l.zxy );
-    vec3 i2 = max( g.xyz, l.zxy );
-    vec3 x1 = x0 - i1 + C.xxx;
-    vec3 x2 = x0 - i2 + C.yyy;
-    vec3 x3 = x0 - D.yyy;
-    i = mod289(i);
-    vec4 p = permute( permute( permute(
-               i.z + vec4(0.0, i1.z, i2.z, 1.0 ))
-             + i.y + vec4(0.0, i1.y, i2.y, 1.0 ))
-             + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
-    float n_ = 0.142857142857;
-    vec3  ns = n_ * D.wyz - D.xzx;
-    vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
-    vec4 x_ = floor(j * ns.z);
-    vec4 y_ = floor(j - 7.0 * x_ );
-    vec4 x = x_ *ns.x + ns.yyyy;
-    vec4 y = y_ *ns.x + ns.yyyy;
-    vec4 h = 1.0 - abs(x) - abs(y);
-    vec4 b0 = vec4( x.xy, y.xy );
-    vec4 b1 = vec4( x.zw, y.zw );
-    vec4 s0 = floor(b0)*2.0 + 1.0;
-    vec4 s1 = floor(b1)*2.0 + 1.0;
-    vec4 sh = -step(h, vec4(0.0));
-    vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
-    vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
-    vec3 p0 = vec3(a0.xy,h.x);
-    vec3 p1 = vec3(a0.zw,h.y);
-    vec3 p2 = vec3(a1.xy,h.z);
-    vec3 p3 = vec3(a1.zw,h.w);
-    vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
-    p0 *= norm.x;
-    p1 *= norm.y;
-    p2 *= norm.z;
-    p3 *= norm.w;
-    vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
-    m = m * m;
-    return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3) ) );
-  }
-
-  void main() {
-    // Generate multiple layers of noise for surface activity
-    float n1 = snoise(vPosition * 1.5 + time * 0.2);
-    float n2 = snoise(vPosition * 3.0 - time * 0.3);
-    float n3 = snoise(vPosition * 6.0 + time * 0.5);
-    
-    // Combine noise layers
-    float noise = (n1 * 0.5 + n2 * 0.3 + n3 * 0.2);
-    
-    // Map noise to colors
-    vec3 colorDark = vec3(0.8, 0.2, 0.0);    // Deep red/orange
-    vec3 colorMid = vec3(1.0, 0.6, 0.1);     // Bright orange
-    vec3 colorLight = vec3(1.0, 0.95, 0.8);  // White hot
-    
-    vec3 finalColor = mix(colorDark, colorMid, smoothstep(-0.5, 0.2, noise));
-    finalColor = mix(finalColor, colorLight, smoothstep(0.2, 0.8, noise));
-    
-    gl_FragColor = vec4(finalColor, 1.0);
-  }
-`;
-
-const coronaVertexShader = `
-  varying vec2 vUv;
-  void main() {
-    vUv = uv;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  }
-`;
-
-const coronaFragmentShader = `
-  uniform float time;
-  varying vec2 vUv;
-  
-  // 3D Simplex Noise
-  vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
-  vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
-  vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
-  vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
-
-  float snoise(vec3 v) {
-    const vec2  C = vec2(1.0/6.0, 1.0/3.0) ;
-    const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
-    vec3 i  = floor(v + dot(v, C.yyy) );
-    vec3 x0 = v - i + dot(i, C.xxx) ;
-    vec3 g = step(x0.yzx, x0.xyz);
-    vec3 l = 1.0 - g;
-    vec3 i1 = min( g.xyz, l.zxy );
-    vec3 i2 = max( g.xyz, l.zxy );
-    vec3 x1 = x0 - i1 + C.xxx;
-    vec3 x2 = x0 - i2 + C.yyy;
-    vec3 x3 = x0 - D.yyy;
-    i = mod289(i);
-    vec4 p = permute( permute( permute(
-               i.z + vec4(0.0, i1.z, i2.z, 1.0 ))
-             + i.y + vec4(0.0, i1.y, i2.y, 1.0 ))
-             + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
-    float n_ = 0.142857142857;
-    vec3  ns = n_ * D.wyz - D.xzx;
-    vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
-    vec4 x_ = floor(j * ns.z);
-    vec4 y_ = floor(j - 7.0 * x_ );
-    vec4 x = x_ *ns.x + ns.yyyy;
-    vec4 y = y_ *ns.x + ns.yyyy;
-    vec4 h = 1.0 - abs(x) - abs(y);
-    vec4 b0 = vec4( x.xy, y.xy );
-    vec4 b1 = vec4( x.zw, y.zw );
-    vec4 s0 = floor(b0)*2.0 + 1.0;
-    vec4 s1 = floor(b1)*2.0 + 1.0;
-    vec4 sh = -step(h, vec4(0.0));
-    vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
-    vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
-    vec3 p0 = vec3(a0.xy,h.x);
-    vec3 p1 = vec3(a0.zw,h.y);
-    vec3 p2 = vec3(a1.xy,h.z);
-    vec3 p3 = vec3(a1.zw,h.w);
-    vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
-    p0 *= norm.x;
-    p1 *= norm.y;
-    p2 *= norm.z;
-    p3 *= norm.w;
-    vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
-    m = m * m;
-    return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3) ) );
-  }
-
-  void main() {
-    vec2 center = vec2(0.5, 0.5);
-    vec2 pos = vUv - center;
-    float dist = length(pos);
-    
-    // Angle for radial noise
-    float angle = atan(pos.y, pos.x);
-    
-    // Volumetric flares using 3D noise
-    // Map polar coordinates to a cylinder in 3D space, moving through time
-    vec3 noisePos1 = vec3(cos(angle) * 4.0, sin(angle) * 4.0, dist * 10.0 - time * 1.5);
-    vec3 noisePos2 = vec3(cos(angle) * 8.0, sin(angle) * 8.0, dist * 20.0 - time * 2.5);
-    
-    float n1 = snoise(noisePos1) * 0.5 + 0.5;
-    float n2 = snoise(noisePos2) * 0.5 + 0.5;
-    
-    // Combine noise for flare shapes
-    float flareNoise = n1 * 0.7 + n2 * 0.3;
-    
-    // Create distinct, erupting flare spikes
-    float flares = pow(max(0.0, flareNoise - 0.2), 3.0) * 0.4;
-    
-    // Add some low-frequency pulsing
-    float pulse = sin(time * 0.5) * 0.01 + 0.01;
-    
-    // Base corona radius
-    float radius = 0.15 + flares + pulse;
-    
-    // Smooth falloff
-    float intensity = 1.0 - smoothstep(radius, 0.45, dist);
-    intensity = pow(intensity, 2.0); // Sharper falloff
-    
-    // Color gradient from white-hot core to orange edge
-    vec3 coreColor = vec3(1.0, 0.9, 0.7);
-    vec3 edgeColor = vec3(1.0, 0.3, 0.0);
-    vec3 finalColor = mix(edgeColor, coreColor, intensity);
-    
-    // Fade out completely at the edges
-    float alpha = intensity * smoothstep(0.5, 0.2, dist);
-    
-    // Add extra brightness and heat to the flares
-    finalColor += vec3(1.0, 0.6, 0.1) * flares * 3.0 * alpha;
-    
-    gl_FragColor = vec4(finalColor, alpha);
-  }
-`;
 
 // Helper to convert lat/lon to 3D position on a sphere
 function latLongToVector3(lat: number, lon: number, radius: number) {
@@ -322,82 +127,22 @@ function LandmarkMarker({ landmark }: { landmark: any }) {
 
 // Accurate subsolar point calculation
 function getSubsolarPoint(date: Date) {
-  const start = new Date(date.getUTCFullYear(), 0, 0);
-  const diff = date.getTime() - start.getTime();
-  const oneDay = 1000 * 60 * 60 * 24;
-  const dayOfYear = Math.floor(diff / oneDay);
-
-  const gamma = (2 * Math.PI / 365) * (dayOfYear - 1 + (date.getUTCHours() - 12) / 24);
-
-  const eqTime = 229.18 * (
-      0.000075 +
-      0.001868 * Math.cos(gamma) -
-      0.032077 * Math.sin(gamma) -
-      0.014615 * Math.cos(2 * gamma) -
-      0.040849 * Math.sin(2 * gamma)
-  );
-
-  const decl = 0.006918 -
-      0.399912 * Math.cos(gamma) +
-      0.070257 * Math.sin(gamma) -
-      0.006758 * Math.cos(2 * gamma) +
-      0.000907 * Math.sin(2 * gamma) -
-      0.002697 * Math.cos(3 * gamma) +
-      0.00148 * Math.sin(3 * gamma);
-
-  const lat = decl * (180 / Math.PI);
-  const timeOffset = eqTime;
-  const tst = date.getUTCHours() * 60 + date.getUTCMinutes() + date.getUTCSeconds() / 60 + timeOffset;
-  let ha = (tst / 4) - 180;
-  let lon = -ha;
-  
+  const sun = Astronomy.Equator('Sun', date, new Astronomy.Observer(0, 0, 0), true, true);
+  const gast = Astronomy.SiderealTime(date);
+  let lon = (sun.ra - gast) * 15;
   if (lon > 180) lon -= 360;
   if (lon < -180) lon += 360;
-
-  return { lat, lon };
+  return { lat: sun.dec, lon: lon };
 }
 
-// Sublunar point using SunCalc
+// Sublunar point using Astronomy
 function getSublunarPoint(date: Date) {
-  let lat = 0;
-  let lon = 0;
-  let maxAlt = -Infinity;
-  
-  for(let i=-90; i<=90; i+=30) {
-      for(let j=-180; j<=180; j+=30) {
-          const alt = SunCalc.getMoonPosition(date, i, j).altitude;
-          if(alt > maxAlt) {
-              maxAlt = alt;
-              lat = i;
-              lon = j;
-          }
-      }
-  }
-  
-  let step = 10;
-  for(let iter=0; iter<8; iter++) {
-      let bestLat = lat;
-      let bestLon = lon;
-      for(let i = lat - step; i <= lat + step; i += step/2) {
-          for(let j = lon - step; j <= lon + step; j += step/2) {
-              const testLat = Math.max(-90, Math.min(90, i));
-              let testLon = j;
-              if (testLon > 180) testLon -= 360;
-              if (testLon < -180) testLon += 360;
-              
-              const alt = SunCalc.getMoonPosition(date, testLat, testLon).altitude;
-              if(alt > maxAlt) {
-                  maxAlt = alt;
-                  bestLat = testLat;
-                  bestLon = testLon;
-              }
-          }
-      }
-      lat = bestLat;
-      lon = bestLon;
-      step /= 2;
-  }
-  return { lat, lon };
+  const moon = Astronomy.Equator('Moon', date, new Astronomy.Observer(0, 0, 0), true, true);
+  const gast = Astronomy.SiderealTime(date);
+  let lon = (moon.ra - gast) * 15;
+  if (lon > 180) lon -= 360;
+  if (lon < -180) lon += 360;
+  return { lat: moon.dec, lon: lon };
 }
 
 function MovingStars() {
@@ -411,42 +156,128 @@ function MovingStars() {
   return <Stars ref={starsRef} radius={100} depth={50} count={8000} factor={7} saturation={0.5} fade speed={2} />;
 }
 
-function ISSTracker() {
-  const [issPos, setIssPos] = useState<THREE.Vector3 | null>(null);
+const auroraVertexShader = `
+  varying vec2 vUv;
+  varying vec3 vPosition;
+  varying vec3 vNormalWorld;
+  void main() {
+    vUv = uv;
+    vPosition = position;
+    vNormalWorld = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
 
-  useEffect(() => {
-    const fetchISS = async () => {
-      try {
-        const res = await fetch('https://api.wheretheiss.at/v1/satellites/25544');
-        const data = await res.json();
-        // Earth radius is 2. ISS is ~400km above Earth (Earth radius ~6371km).
-        // Scale: 2 * (1 + 400/6371) = 2 * 1.0627 = 2.125
-        const pos = latLongToVector3(data.latitude, data.longitude, 2.125);
-        setIssPos(pos);
-      } catch (e) {
-        console.error("Failed to fetch ISS data", e);
-      }
-    };
-    fetchISS();
-    const interval = setInterval(fetchISS, 3000);
-    return () => clearInterval(interval);
-  }, []);
+const auroraFragmentShader = `
+  uniform float time;
+  uniform vec3 sunDirection;
+  varying vec2 vUv;
+  varying vec3 vPosition;
+  varying vec3 vNormalWorld;
 
-  if (!issPos) return null;
+  // 3D Simplex Noise
+  vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+  vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+  vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
+  vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+
+  float snoise(vec3 v) {
+    const vec2  C = vec2(1.0/6.0, 1.0/3.0) ;
+    const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
+    vec3 i  = floor(v + dot(v, C.yyy) );
+    vec3 x0 = v - i + dot(i, C.xxx) ;
+    vec3 g = step(x0.yzx, x0.xyz);
+    vec3 l = 1.0 - g;
+    vec3 i1 = min( g.xyz, l.zxy );
+    vec3 i2 = max( g.xyz, l.zxy );
+    vec3 x1 = x0 - i1 + C.xxx;
+    vec3 x2 = x0 - i2 + C.yyy;
+    vec3 x3 = x0 - D.yyy;
+    i = mod289(i);
+    vec4 p = permute( permute( permute(
+               i.z + vec4(0.0, i1.z, i2.z, 1.0 ))
+             + i.y + vec4(0.0, i1.y, i2.y, 1.0 ))
+             + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
+    float n_ = 0.142857142857;
+    vec3  ns = n_ * D.wyz - D.xzx;
+    vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+    vec4 x_ = floor(j * ns.z);
+    vec4 y_ = floor(j - 7.0 * x_ );
+    vec4 x = x_ *ns.x + ns.yyyy;
+    vec4 y = y_ *ns.x + ns.yyyy;
+    vec4 h = 1.0 - abs(x) - abs(y);
+    vec4 b0 = vec4( x.xy, y.xy );
+    vec4 b1 = vec4( x.zw, y.zw );
+    vec4 s0 = floor(b0)*2.0 + 1.0;
+    vec4 s1 = floor(b1)*2.0 + 1.0;
+    vec4 sh = -step(h, vec4(0.0));
+    vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
+    vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
+    vec3 p0 = vec3(a0.xy,h.x);
+    vec3 p1 = vec3(a0.zw,h.y);
+    vec3 p2 = vec3(a1.xy,h.z);
+    vec3 p3 = vec3(a1.zw,h.w);
+    vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
+    p0 *= norm.x;
+    p1 *= norm.y;
+    p2 *= norm.z;
+    p3 *= norm.w;
+    vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+    m = m * m;
+    return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3) ) );
+  }
+
+  void main() {
+    // Latitude based mask (aurora mostly visible near poles)
+    float latMask = smoothstep(0.6, 0.85, abs(vPosition.y / 2.0));
+    
+    // Night side mask
+    float sunDot = dot(vNormalWorld, sunDirection);
+    float nightMask = 1.0 - smoothstep(-0.2, 0.1, sunDot);
+    
+    // Noise generation for aurora shapes
+    float n1 = snoise(vec3(vPosition.x * 3.0, vPosition.y * 10.0 - time * 0.5, vPosition.z * 3.0 + time * 0.2));
+    float n2 = snoise(vec3(vPosition.x * 5.0 - time * 0.3, vPosition.y * 15.0, vPosition.z * 5.0 + time * 0.4));
+    
+    float auroraNoise = smoothstep(0.2, 0.8, n1 * 0.5 + n2 * 0.5 + 0.5);
+    
+    float intensity = latMask * nightMask * auroraNoise;
+    
+    vec3 auroraColor = vec3(0.1, 0.8, 0.4); // Greenish
+    auroraColor = mix(auroraColor, vec3(0.5, 0.2, 0.8), snoise(vPosition * 2.0 + time * 0.1) * 0.5 + 0.5); // Add some purple
+    
+    gl_FragColor = vec4(auroraColor, intensity * 0.6);
+  }
+`;
+
+function Aurora({ sunPosition }: { sunPosition: THREE.Vector3 }) {
+  const materialRef = useRef<THREE.ShaderMaterial>(null);
+  
+  const uniforms = useMemo(() => ({
+    time: { value: 0 },
+    sunDirection: { value: sunPosition.clone().normalize() }
+  }), []);
+
+  useFrame((state) => {
+    if (materialRef.current) {
+      materialRef.current.uniforms.time.value = state.clock.elapsedTime;
+      materialRef.current.uniforms.sunDirection.value.copy(sunPosition).normalize();
+    }
+  });
 
   return (
-    <group position={issPos}>
-      <mesh>
-        <boxGeometry args={[0.04, 0.04, 0.04]} />
-        <meshStandardMaterial color="#4ade80" emissive="#4ade80" emissiveIntensity={2} />
-      </mesh>
-      <Html center>
-        <div className="flex items-center gap-1 bg-black/80 text-green-400 text-[10px] px-1.5 py-0.5 rounded border border-green-500/50 whitespace-nowrap">
-          <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></div>
-          ISS
-        </div>
-      </Html>
-    </group>
+    <mesh>
+      <sphereGeometry args={[2.03, 64, 64]} />
+      <shaderMaterial
+        ref={materialRef}
+        uniforms={uniforms}
+        vertexShader={auroraVertexShader}
+        fragmentShader={auroraFragmentShader}
+        transparent
+        blending={THREE.AdditiveBlending}
+        depthWrite={false}
+      />
+    </mesh>
   );
 }
 
@@ -562,6 +393,9 @@ function Earth({ sunPosition, geoJson, selectedFeature, onClick }: { sunPosition
       {/* Country Borders */}
       <CountryBorders geoJson={geoJson} />
       
+      {/* Aurora */}
+      <Aurora sunPosition={sunPosition} />
+      
       {/* Selected Country Border */}
       <SelectedCountryBorder feature={selectedFeature} />
 
@@ -583,40 +417,57 @@ function Earth({ sunPosition, geoJson, selectedFeature, onClick }: { sunPosition
   );
 }
 
-function Moon({ position }: { position: THREE.Vector3 }) {
+function Moon({ position, sunPosition }: { position: THREE.Vector3, sunPosition: THREE.Vector3 }) {
   const moonMap = useTexture('https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/planets/moon_1024.jpg');
+
+  const uniforms = useMemo(() => ({
+    moonMap: { value: moonMap },
+    sunDirection: { value: new THREE.Vector3() }
+  }), [moonMap]);
+
+  useFrame(() => {
+    // Calculate direction from moon to sun
+    const dir = new THREE.Vector3().subVectors(sunPosition, position).normalize();
+    uniforms.sunDirection.value.copy(dir);
+  });
 
   return (
     <group position={position}>
       <mesh>
         <sphereGeometry args={[0.5, 32, 32]} />
-        <meshStandardMaterial map={moonMap} roughness={1} metalness={0} />
+        <shaderMaterial
+          uniforms={uniforms}
+          vertexShader={`
+            varying vec2 vUv;
+            varying vec3 vNormalWorld;
+            void main() {
+              vUv = uv;
+              vNormalWorld = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+          `}
+          fragmentShader={`
+            uniform sampler2D moonMap;
+            uniform vec3 sunDirection;
+            varying vec2 vUv;
+            varying vec3 vNormalWorld;
+            void main() {
+              vec4 texColor = texture2D(moonMap, vUv);
+              float intensity = max(0.0, dot(vNormalWorld, sunDirection));
+              
+              // Add a tiny bit of ambient light so the dark side isn't pitch black
+              intensity = intensity * 0.95 + 0.05;
+              
+              gl_FragColor = vec4(texColor.rgb * intensity, 1.0);
+            }
+          `}
+        />
       </mesh>
     </group>
   );
 }
 
 function Sun({ position }: { position: THREE.Vector3 }) {
-  const sunMaterialRef = useRef<THREE.ShaderMaterial>(null);
-  const coronaMaterialRef = useRef<THREE.ShaderMaterial>(null);
-
-  const sunUniforms = useMemo(() => ({
-    time: { value: 0 }
-  }), []);
-
-  const coronaUniforms = useMemo(() => ({
-    time: { value: 0 }
-  }), []);
-
-  useFrame((state) => {
-    if (sunMaterialRef.current) {
-      sunMaterialRef.current.uniforms.time.value = state.clock.elapsedTime;
-    }
-    if (coronaMaterialRef.current) {
-      coronaMaterialRef.current.uniforms.time.value = state.clock.elapsedTime;
-    }
-  });
-
   const sunTexture = useMemo(() => {
     const canvas = document.createElement('canvas');
     canvas.width = 512;
@@ -625,10 +476,9 @@ function Sun({ position }: { position: THREE.Vector3 }) {
     if (context) {
       const gradient = context.createRadialGradient(256, 256, 0, 256, 256, 256);
       gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');
-      gradient.addColorStop(0.1, 'rgba(255, 255, 255, 0.8)');
-      gradient.addColorStop(0.3, 'rgba(255, 200, 50, 0.4)');
-      gradient.addColorStop(0.6, 'rgba(255, 100, 0, 0.1)');
-      gradient.addColorStop(1, 'rgba(255, 50, 0, 0)');
+      gradient.addColorStop(0.2, 'rgba(255, 255, 255, 0.8)');
+      gradient.addColorStop(0.5, 'rgba(255, 255, 255, 0.2)');
+      gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
       context.fillStyle = gradient;
       context.fillRect(0, 0, 512, 512);
     }
@@ -642,72 +492,68 @@ function Sun({ position }: { position: THREE.Vector3 }) {
       {/* Sun Body */}
       <mesh>
         <sphereGeometry args={[2, 64, 64]} />
-        <shaderMaterial
-          ref={sunMaterialRef}
-          uniforms={sunUniforms}
-          vertexShader={sunVertexShader}
-          fragmentShader={sunFragmentShader}
-        />
+        <meshBasicMaterial color="#ffffff" />
       </mesh>
 
-      {/* Dynamic Corona / Flares */}
-      <sprite scale={[14, 14, 1]}>
-        <shaderMaterial
-          ref={coronaMaterialRef}
-          uniforms={coronaUniforms}
-          vertexShader={coronaVertexShader}
-          fragmentShader={coronaFragmentShader}
-          transparent={true}
-          blending={THREE.AdditiveBlending}
-          depthWrite={false}
-        />
-      </sprite>
-
-      {/* Outer Glow */}
-      <sprite scale={[35, 35, 1]}>
-        <spriteMaterial map={sunTexture} blending={THREE.AdditiveBlending} depthWrite={false} transparent />
+      {/* Sun Glow */}
+      <sprite scale={[25, 25, 1]}>
+        <spriteMaterial map={sunTexture} color="#ffffff" transparent blending={THREE.AdditiveBlending} depthWrite={false} />
       </sprite>
     </group>
   );
 }
 
 function SelectedCountryBorder({ feature }: { feature: any }) {
-  const [borderPoints, setBorderPoints] = useState<THREE.Vector3[]>([]);
+  const [borderRings, setBorderRings] = useState<THREE.Vector3[][]>([]);
 
   useEffect(() => {
     if (!feature || !feature.geometry) {
-      setBorderPoints([]);
+      setBorderRings([]);
       return;
     }
-    const points: THREE.Vector3[] = [];
+    const rings: THREE.Vector3[][] = [];
     const geom = feature.geometry;
     const coords = geom.type === 'Polygon' ? [geom.coordinates] : geom.type === 'MultiPolygon' ? geom.coordinates : [];
     
     coords.forEach((polygon: any) => {
       polygon.forEach((ring: any) => {
-        for (let i = 0; i < ring.length - 1; i++) {
+        const points: THREE.Vector3[] = [];
+        for (let i = 0; i < ring.length; i++) {
           // Render slightly higher than the base borders to avoid z-fighting
-          const p1 = latLongToVector3(ring[i][1], ring[i][0], 2.004);
-          const p2 = latLongToVector3(ring[i+1][1], ring[i+1][0], 2.004);
-          points.push(p1, p2);
+          points.push(latLongToVector3(ring[i][1], ring[i][0], 2.004));
         }
+        rings.push(points);
       });
     });
-    setBorderPoints(points);
+    setBorderRings(rings);
   }, [feature]);
 
-  if (!borderPoints.length) return null;
+  if (!borderRings.length) return null;
 
   return (
-    <Line 
-      points={borderPoints} 
-      segments 
-      color="#3b82f6" 
-      lineWidth={3} 
-      transparent 
-      opacity={1} 
-      depthTest={false} 
-    />
+    <group>
+      {borderRings.map((ring, i) => {
+        const positions = new Float32Array(ring.length * 3);
+        for (let j = 0; j < ring.length; j++) {
+          positions[j * 3] = ring[j].x;
+          positions[j * 3 + 1] = ring[j].y;
+          positions[j * 3 + 2] = ring[j].z;
+        }
+        return (
+          <line key={i}>
+            <bufferGeometry>
+              <bufferAttribute
+                attach="attributes-position"
+                count={ring.length}
+                array={positions}
+                itemSize={3}
+              />
+            </bufferGeometry>
+            <lineBasicMaterial color="#3b82f6" linewidth={2} transparent opacity={0.8} depthTest={false} />
+          </line>
+        );
+      })}
+    </group>
   );
 }
 
@@ -751,6 +597,14 @@ export default function EarthScene() {
   const [news, setNews] = useState<{title: string, url: string}[]>([]);
   const [geoJson, setGeoJson] = useState<any>(null);
   const [selectedFeature, setSelectedFeature] = useState<any>(null);
+  const [timeMultiplier, setTimeMultiplier] = useState(1);
+  const [showISS, setShowISS] = useState(true);
+  const [showStarlink, setShowStarlink] = useState(true);
+  const [rotationMode, setRotationMode] = useState<'sun' | 'earth'>('sun');
+  const [earthRotation, setEarthRotation] = useState(0);
+  const baseTimeRef = useRef(new Date().getTime());
+  const realTimeRef = useRef(performance.now());
+  const reqRef = useRef<number>();
   const [locationData, setLocationData] = useState<{
     lat: number, 
     lon: number, 
@@ -759,10 +613,18 @@ export default function EarthScene() {
     sunset: Date|null, 
     moonPhase: number,
     country?: string,
+    countryCode?: string,
     state?: string,
-    city?: string,
+    district?: string,
     loadingLocation?: boolean
   } | null>(null);
+
+  const handleSpeedChange = (mult: number) => {
+    setTimeMultiplier(mult);
+    const now = Date.now();
+    baseTimeRef.current = now;
+    realTimeRef.current = performance.now();
+  };
 
   const handleEarthClick = async (e: any) => {
     e.stopPropagation();
@@ -780,11 +642,13 @@ export default function EarthScene() {
       
       // Find clicked country via d3-geo
       let clickedCountryName = '';
+      let isIndiaState = false;
       if (geoJson) {
         const clickedFeature = geoJson.features.find((f: any) => geoContains(f, [lon, lat]));
         setSelectedFeature(clickedFeature || null);
         if (clickedFeature && clickedFeature.properties) {
           clickedCountryName = clickedFeature.properties.name || clickedFeature.properties.NAME;
+          isIndiaState = clickedFeature.properties.isIndiaState || false;
         }
       }
       
@@ -802,21 +666,33 @@ export default function EarthScene() {
           sunset: times.sunset,
           moonPhase: moonIllum.phase,
           loadingLocation: true,
-          country: clickedCountryName // Set initial country name from GeoJSON
+          country: isIndiaState ? 'India' : clickedCountryName,
+          state: isIndiaState ? clickedCountryName : ''
         });
 
         try {
           const res = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`);
           const data = await res.json();
           
+          let district = '';
+          const admin = data.localityInfo?.administrative || [];
+          const districtObj = admin.find((a: any) => a.name.toLowerCase().includes('district') || (a.description && a.description.toLowerCase().includes('district')));
+          if (districtObj) {
+            district = districtObj.name;
+          } else {
+            const level5 = admin.find((a: any) => a.adminLevel === 5 || a.adminLevel === 6);
+            if (level5) district = level5.name;
+          }
+
           setLocationData(prev => {
             if (!prev) return prev;
             return {
               ...prev,
               loadingLocation: false,
-              country: data.countryName,
+              country: data.countryName || prev.country,
+              countryCode: data.countryCode || prev.countryCode,
               state: data.principalSubdivision,
-              city: data.city || data.locality
+              district: district
             };
           });
 
@@ -879,45 +755,96 @@ export default function EarthScene() {
   };
 
   useEffect(() => {
-    fetch('https://raw.githubusercontent.com/johan/world.geo.json/master/countries.geo.json')
-      .then(res => res.json())
-      .then(data => {
-        // Fix winding order for reversed polygons (like Bermuda)
-        data.features.forEach((f: any) => {
-          if (geoArea(f) > 2 * Math.PI) {
-            if (f.geometry.type === 'Polygon') {
-              f.geometry.coordinates.forEach((ring: any) => ring.reverse());
-            } else if (f.geometry.type === 'MultiPolygon') {
-              f.geometry.coordinates.forEach((polygon: any) => {
-                polygon.forEach((ring: any) => ring.reverse());
-              });
-            }
+    const loadData = async () => {
+      try {
+        const [worldRes, indiaRes] = await Promise.all([
+          fetch('https://raw.githubusercontent.com/datasets/geo-boundaries-world-110m/master/countries.geojson'),
+          fetch('https://raw.githubusercontent.com/datameet/maps/master/Country/india-composite.geojson').catch(() => null)
+        ]);
+
+        if (!worldRes.ok) throw new Error('Failed to load world borders');
+        const worldData = await worldRes.json();
+        let indiaData = null;
+        if (indiaRes && indiaRes.ok) {
+          indiaData = await indiaRes.json();
+        }
+
+        // Remove existing India feature from world data to avoid overlap
+        if (worldData.features) {
+          worldData.features = worldData.features.filter((f: any) => {
+            const name = (f.properties?.name || f.properties?.NAME || '').toLowerCase();
+            const id = (f.id || f.properties?.id || f.properties?.ISO_A3 || '').toLowerCase();
+            return name !== 'india' && id !== 'ind';
+          });
+
+          if (indiaData && indiaData.features) {
+            // Add name property to India features so it works with click handler
+            indiaData.features.forEach((f: any) => {
+              f.properties = f.properties || {};
+              // Preserve state name if available, otherwise default to India
+              f.properties.name = f.properties.ST_NM || f.properties.state_name || 'India';
+              f.properties.isIndiaState = true;
+            });
+            worldData.features.push(...indiaData.features);
           }
-        });
-        setGeoJson(data);
-      })
-      .catch(err => console.error("Failed to load geojson", err));
 
-    const updatePositions = () => {
-      const now = new Date();
-      setCurrentTime(now);
-
-      // Calculate Sun position (scaled out to distance 50)
-      const sunCoords = getSubsolarPoint(now);
-      setSunPos(latLongToVector3(sunCoords.lat, sunCoords.lon, 50));
-
-      // Calculate Moon position (scaled out to distance 15)
-      const moonCoords = getSublunarPoint(now);
-      setMoonPos(latLongToVector3(moonCoords.lat, moonCoords.lon, 15));
+          // Fix winding order for reversed polygons
+          worldData.features.forEach((f: any) => {
+            if (geoArea(f) > 2 * Math.PI) {
+              if (f.geometry.type === 'Polygon') {
+                f.geometry.coordinates.forEach((ring: any) => ring.reverse());
+              } else if (f.geometry.type === 'MultiPolygon') {
+                f.geometry.coordinates.forEach((polygon: any) => {
+                  polygon.forEach((ring: any) => ring.reverse());
+                });
+              }
+            }
+          });
+          setGeoJson(worldData);
+        }
+      } catch (err) {
+        console.error("Failed to load geojson", err);
+      }
     };
-
-    // Update immediately
-    updatePositions();
-
-    // Update every minute to keep it live
-    const interval = setInterval(updatePositions, 60000);
-    return () => clearInterval(interval);
+    loadData();
   }, []);
+
+  useEffect(() => {
+    realTimeRef.current = performance.now();
+  }, [timeMultiplier, rotationMode]);
+
+  useEffect(() => {
+    const loop = () => {
+      const now = performance.now();
+      const delta = now - realTimeRef.current;
+      realTimeRef.current = now;
+      
+      baseTimeRef.current += delta * timeMultiplier;
+      const simulatedTime = new Date(baseTimeRef.current);
+      setCurrentTime(simulatedTime);
+
+      const sunCoords = getSubsolarPoint(simulatedTime);
+      const moonCoords = getSublunarPoint(simulatedTime);
+
+      if (rotationMode === 'sun') {
+        setEarthRotation(0);
+        setSunPos(latLongToVector3(sunCoords.lat, sunCoords.lon, 50));
+        setMoonPos(latLongToVector3(moonCoords.lat, moonCoords.lon, 15));
+      } else {
+        // Rotate Earth so that the Sun is always at longitude 0
+        setEarthRotation(-sunCoords.lon * (Math.PI / 180));
+        setSunPos(latLongToVector3(sunCoords.lat, 0, 50));
+        // Moon relative to Sun
+        setMoonPos(latLongToVector3(moonCoords.lat, moonCoords.lon - sunCoords.lon, 15));
+      }
+
+      reqRef.current = requestAnimationFrame(loop);
+    };
+    reqRef.current = requestAnimationFrame(loop);
+    return () => {
+      if (reqRef.current) cancelAnimationFrame(reqRef.current);
+    };
+  }, [timeMultiplier, rotationMode]);
 
   return (
     <div className="w-full h-full bg-black relative">
@@ -930,10 +857,13 @@ export default function EarthScene() {
         <MovingStars />
         
         <React.Suspense fallback={null}>
-          <Earth sunPosition={sunPos} geoJson={geoJson} selectedFeature={selectedFeature} onClick={handleEarthClick} />
-          <Moon position={moonPos} />
+          <group rotation-y={earthRotation}>
+            <Earth sunPosition={sunPos} geoJson={geoJson} selectedFeature={selectedFeature} onClick={handleEarthClick} />
+            {showISS && <ISSTracker simulatedTime={currentTime} />}
+            {showStarlink && <StarlinkSwarm simulatedTime={currentTime} />}
+          </group>
+          <Moon position={moonPos} sunPosition={sunPos} />
           <Sun position={sunPos} />
-          <ISSTracker />
         </React.Suspense>
         
         <OrbitControls 
@@ -948,9 +878,72 @@ export default function EarthScene() {
         />
       </Canvas>
       
-      {/* Live Time Indicator */}
-      <div className="absolute bottom-6 left-6 bg-black/50 backdrop-blur-md border border-white/10 rounded-lg px-4 py-2 text-white font-mono text-sm pointer-events-none">
-        Live UTC: {currentTime.toISOString().replace('T', ' ').substring(0, 19)}
+      {/* Controls Panel */}
+      <div className="absolute bottom-6 left-6 z-10 bg-black/50 backdrop-blur-md border border-white/10 rounded-xl p-4 text-white flex flex-col gap-4">
+        
+        {/* Time Controls */}
+        <div>
+          <div className="text-xs font-medium text-white/50 mb-2 uppercase tracking-wider">Time Controls</div>
+          <div className="flex items-center gap-2">
+            <button 
+              onClick={() => handleSpeedChange(1)}
+              className="px-3 py-1.5 rounded text-sm font-medium transition-colors bg-white/10 hover:bg-white/20 text-white/80"
+            >
+              Present
+            </button>
+            {[1, 60, 3600, 86400].map(mult => (
+              <button 
+                key={mult}
+                onClick={() => handleSpeedChange(mult)}
+                className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${timeMultiplier === mult ? 'bg-blue-500 text-white' : 'bg-white/10 hover:bg-white/20 text-white/80'}`}
+              >
+                {mult === 1 ? '1x' : mult === 60 ? '1m/s' : mult === 3600 ? '1h/s' : '1d/s'}
+              </button>
+            ))}
+          </div>
+          <div className="mt-2 font-mono text-sm text-blue-300">
+            UTC: {currentTime.toISOString().replace('T', ' ').substring(0, 19)}
+          </div>
+        </div>
+
+        {/* View Controls */}
+        <div>
+          <div className="text-xs font-medium text-white/50 mb-2 uppercase tracking-wider">Rotation Mode</div>
+          <div className="flex items-center gap-2">
+            <button 
+              onClick={() => setRotationMode('sun')} 
+              className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${rotationMode === 'sun' ? 'bg-blue-500 text-white' : 'bg-white/10 hover:bg-white/20 text-white/80'}`}
+            >
+              Rotate Sun
+            </button>
+            <button 
+              onClick={() => setRotationMode('earth')} 
+              className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${rotationMode === 'earth' ? 'bg-blue-500 text-white' : 'bg-white/10 hover:bg-white/20 text-white/80'}`}
+            >
+              Rotate Earth
+            </button>
+          </div>
+        </div>
+
+        {/* Layers */}
+        <div>
+          <div className="text-xs font-medium text-white/50 mb-2 uppercase tracking-wider">Layers</div>
+          <div className="flex items-center gap-2">
+            <button 
+              onClick={() => setShowISS(!showISS)} 
+              className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${showISS ? 'bg-green-500 text-white' : 'bg-white/10 hover:bg-white/20 text-white/80'}`}
+            >
+              ISS
+            </button>
+            <button 
+              onClick={() => setShowStarlink(!showStarlink)} 
+              className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${showStarlink ? 'bg-blue-500 text-white' : 'bg-white/10 hover:bg-white/20 text-white/80'}`}
+            >
+              Starlink
+            </button>
+          </div>
+        </div>
+
       </div>
 
       {/* Location Popup */}
@@ -959,13 +952,27 @@ export default function EarthScene() {
           <button onClick={() => setLocationData(null)} className="absolute top-3 right-3 text-gray-400 hover:text-white">
             <X className="w-5 h-5" />
           </button>
-          <h3 className="text-lg font-semibold mb-1 leading-tight">
+          <h3 className="text-lg font-semibold mb-1 leading-tight flex items-center gap-2">
+            {locationData.countryCode && (
+              <img 
+                src={`https://flagcdn.com/w40/${locationData.countryCode.toLowerCase()}.png`} 
+                alt={locationData.countryCode} 
+                className="w-6 h-4 object-cover rounded-sm" 
+              />
+            )}
             {locationData.loadingLocation ? (
               <span className="animate-pulse">Locating...</span>
             ) : (
-              locationData.city || locationData.state || locationData.country 
-                ? [locationData.city, locationData.state, locationData.country].filter(Boolean).join(', ')
-                : 'Ocean / Uncharted Territory'
+              <div className="flex flex-col">
+                <span className="text-lg font-bold">
+                  {locationData.district || locationData.state || locationData.country || 'Ocean / Uncharted Territory'}
+                </span>
+                {(locationData.state || locationData.district) && locationData.country && (
+                  <span className="text-sm text-gray-400 font-normal">
+                    {locationData.country}
+                  </span>
+                )}
+              </div>
             )}
           </h3>
           <div className="text-xs text-gray-400 mb-4">
