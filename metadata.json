@@ -1,0 +1,5 @@
+{
+  "name": "Interactive Earth",
+  "description": "A 3D interactive Earth simulation featuring day/night cycles, city lights, clouds, and an orbiting moon.",
+  "requestFramePermissions": []
+}
